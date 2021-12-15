@@ -1,0 +1,89 @@
+---
+title: "Compare Approaches"
+author: "Melissa Wong"
+date: "12/15/2021"
+output: html_document
+---
+
+# Setup
+
+```{r libraries, results='hide', message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(broom)
+library(RColorBrewer)
+library(here)
+```
+
+```{r options}
+options("scipen" = 1, "digits" = 4)
+
+#knitr::opts_chunk$set(echo = FALSE)
+#knitr::opts_chunk$set(message = FALSE)
+#knitr::opts_chunk$set(warning = FALSE)
+#knitr::opts_chunk$set(out.width = "50%")
+#knitr::opts_chunk$set(fig.align = "center")
+
+set.seed(1234)
+```
+
+# Simulate Data
+
+```{r}
+
+# Proportion of rounded/truncated data
+prop <- seq(0.1, 0.9, 0.1)
+
+N <- 1000
+alpha_true = -1
+beta_true = 1
+sigma_true = 1
+
+sidx <- lapply(prop, function(p) sample(1:N, N * p, replace=FALSE))
+
+df <- lapply(sidx, function(idx) {
+  tmp <- data.frame(x = rnorm(N, 0, 5),
+                    prop = length(idx)/N) %>%
+  mutate(y_true = alpha_true + beta_true*x + rnorm(N, 0, sigma_true),
+         y_round = y_true,
+         y_trunc = y_true,
+         iflag = 0
+  )
+  # Simulate a "mixture" with some subset of the data truncated/rounded
+  tmp$y_round[idx] <- round(tmp$y_round[idx])
+  tmp$y_trunc[idx] <- trunc(tmp$y_trunc[idx])
+  tmp$iflag[idx] <- 1
+  tmp
+})
+
+# Convert list to tidy dataframe
+df_tidy <- do.call(rbind.data.frame, df)
+```
+
+# Kolmogorv-Smirnoff Test
+
+```{r warning=FALSE}
+
+# Test proportion of rounding
+df_tidy %>% 
+  group_by(prop) %>% 
+  summarise(tidy(ks.test(y_true, y_round))) %>% 
+  ggplot() +
+  geom_point(mapping=aes(x=prop, y=p.value)) +
+  scale_x_continuous(breaks=prop) +
+  labs(title="K-S test y_true vs y_round",
+       x="Proportion of rounded data")
+
+# Test proportion of truncation
+df_tidy %>% 
+  group_by(prop) %>% 
+  summarise(tidy(ks.test(y_true, y_trunc))) %>% 
+  ggplot() +
+  geom_point(mapping=aes(x=prop, y=p.value)) +
+  scale_x_continuous(breaks=prop) +
+  labs(title="K-S test y_true vs y_trunc",
+       x="Proportion of truncated data")
+```
+
+
+
