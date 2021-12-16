@@ -81,32 +81,26 @@ for (i in seq_along(N)) {
 }
 ```
 
-# Kolmogorv-Smirnoff Test
+# Reference Distribution Known
+
+## Two-Sample Kolmogorv-Smirnoff Test
 
 ```{r warning=FALSE}
 
 # Test proportion of rounding
-df_tidy %>% 
+ks_round <- df_tidy %>% 
   group_by(prop, n) %>% 
   summarise(tidy(ks.test(y_true, y_round))) %>% 
   ungroup() %>%
-  ggplot(mapping=aes(x=prop, 
-                        y=p.value, 
-                        color=factor(n))) +
-  geom_point() +
-  geom_line() +
-  geom_hline(mapping=aes(yintercept=0.05),
-             color="red",
-             linetype="dashed") +
-  scale_x_continuous(breaks=prop) +
-  labs(title="K-S test y_true vs y_round",
-       x="Proportion of rounded data")
+  mutate(method="Two-sample KS test, y_true vs. y_round")
 
-# Test proportion of truncation
-df_tidy %>% 
+ks_trunc <- df_tidy %>% 
   group_by(prop, n) %>% 
   summarise(tidy(ks.test(y_true, y_trunc))) %>% 
   ungroup() %>%
+  mutate(method="Two-sample KS test, y_true vs. y_trunc")
+
+rbind(ks_round, ks_trunc) %>% 
   ggplot(mapping=aes(x=prop, 
                         y=p.value, 
                         color=factor(n))) +
@@ -116,10 +110,85 @@ df_tidy %>%
              color="red",
              linetype="dashed") +
   scale_x_continuous(breaks=prop) +
-  labs(title="K-S test y_true vs y_trunc",
-       x="Proportion of truncated data")
+  labs(x="Proportion of truncated data",
+       color="Number of Obs") +
+  facet_grid(~method)
 ```
 
+For $\alpha=0.05$:
+
+* The KS test fails to reject the null hypothesis that the samples are drawn from the same distribution for all simulated rounded data cases .
+
+* The KS rejects the null when the sample size is large (>500 obs) and the proportion truncated is high (>0.7) for the simulated truncated data cases.
+
+# Family of Distribution Known
+
+In reality, we don't know the exact reference distribution but we can reasonably assume it is Normal.
+
+# One-Sample Kolmogorv-Smirnov Test
+
+```{r warning=FALSE}
+
+# Test proportion of rounding
+ks1_round <- df_tidy %>% 
+  group_by(prop, n) %>% 
+  summarise(tidy(ks.test(y_round, "pnorm", mean=mean(y_round), sd=sd(y_round)))) %>% 
+  ungroup() %>%
+  mutate(method="One-sample KS test, y_round")
+
+ks1_trunc <- df_tidy %>% 
+  group_by(prop, n) %>% 
+  summarise(tidy(ks.test(y_trunc, "pnorm", mean=mean(y_trunc), sd=sd(y_trunc)))) %>% 
+  ungroup() %>%
+  mutate(method="One-sample KS test, y_trunc")
+
+rbind(ks1_round, ks1_trunc) %>% 
+  ggplot(mapping=aes(x=prop, 
+                        y=p.value, 
+                        color=factor(n))) +
+  geom_point() +
+  geom_line() +
+  geom_hline(mapping=aes(yintercept=0.05),
+             color="red",
+             linetype="dashed") +
+  scale_x_continuous(breaks=prop) +
+  labs(x="Proportion of truncated data",
+       color="Number of Obs") +
+  facet_grid(~method)
+```
+
+# Shapiro-Wilk Test
+
+Another alternative is the Shapiro-Wilk test, the advantage being that it is more powerful than the Kolmogorov-Smirnov test for testing Normality.
+
+```{r}
+sw_round <- df_tidy %>% 
+  group_by(prop, n) %>% 
+  summarise(tidy(shapiro.test(y_round))) %>% 
+  ungroup() %>% 
+  mutate(method="Shapiro-Wilk test, y_round")
+
+sw_trunc <- df_tidy %>% 
+  group_by(prop, n) %>% 
+  summarise(tidy(shapiro.test(y_trunc))) %>% 
+  ungroup() %>% 
+  mutate(method="Shapiro-Wilk test, y_trunc")
+
+rbind(sw_round, sw_trunc) %>% 
+  ggplot(mapping=aes(x=prop, 
+                        y=p.value, 
+                        color=factor(n))) +
+  geom_point() +
+  geom_line() +
+  geom_hline(mapping=aes(yintercept=0.05),
+             color="red",
+             linetype="dashed") +
+  scale_x_continuous(breaks=prop) +
+  labs(x="Proportion of rounded data",
+       color="Number of Obs") +
+  facet_grid(~method)
+
+```
 
 # Bayesian Models
 
