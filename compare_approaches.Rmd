@@ -5,6 +5,27 @@ date: "12/15/2021"
 output: html_document
 ---
 
+# Problem Description
+
+Given some observational data and the following assumed generative model, we are interested in estimating the effect of _x_ (i.e., $\beta$).
+
+\begin{align*}
+  y &\sim N(\mu, \sigma) \\
+  \mu &= \alpha + x*\beta
+\end{align*}
+
+However, after doing some exploratory data analysis it appears that some of the response values are truncated or rounded (we don't know which). The question is how does the proportion of truncated/rounded data affect the estimate of $\beta$ and at what point can we no longer ignore the truncation/rounding?
+
+Let's consider the following approaches:
+
+1. Kolmogorov-Smirnov test
+
+2. Shapiro-Wilk test
+
+3. OLS Confidence Interval Coverage
+
+4. Bayesian Credible Interval Coverage
+
 # Setup
 
 ```{r libraries, results='hide', message=FALSE, warning=FALSE}
@@ -27,173 +48,227 @@ options("scipen" = 1, "digits" = 4)
 set.seed(1234)
 ```
 
-# Simulate Data
+# User-defined Parameters
 
-```{r}
-
+```{r user_params}
 # Proportion of rounded/truncated data
 prop <- seq(0.1, 0.9, 0.1)
 
+# Number of obs
 N <- c(25, 100, 500, 1000)
 
-params <- expand.grid(prop=prop, N=N)
+params <- expand.grid(N=N, prop=prop)
 
+# True parameter values
 alpha_true = -1
 beta_true = 1
 sigma_true = 1
-
-sidx <- apply(params, 1, function(p) sample(1:p[2], p[2] * p[1], replace=FALSE))
-
-df <-lapply(1:length(sidx), function(i) {
-  tmp <- data.frame(x = rnorm(params[i, "N"], 0, 5),
-                    prop = params[i, "prop"],
-                    n = params[i, "N"]) %>%
-  mutate(y_true = alpha_true + beta_true*x + rnorm(params[i, "N"], 0, sigma_true),
-         y_round = y_true,
-         y_trunc = y_true,
-         iflag = 0
-  )
-  # Simulate a "mixture" with some subset of the data truncated/rounded
-  tmp$y_round[sidx[[i]]] <- round(tmp$y_round[sidx[[i]]])
-  tmp$y_trunc[sidx[[i]]] <- trunc(tmp$y_trunc[sidx[[i]]])
-  tmp$iflag[sidx[[i]]] <- 1
-  tmp
-})
-
-# Convert list to tidy dataframe
-df_tidy <- do.call(rbind.data.frame, df)
 ```
 
+# Define Helper Functions
 
-```{r eval=FALSE, include=FALSE}
-for (i in seq_along(N)) {
-  print(
-    df_tidy %>%
-      filter(n==N[i]) %>%
-      select(-iflag) %>% 
-      pivot_longer(-c("x", "prop", "n"), names_to="data") %>%
-      ggplot() +
-      geom_point(aes(x=x, y=value, color=data), 
-               alpha=0.2) +
-      facet_grid(prop ~ data) +
-      labs(title=paste("Sample Size =", N[i]))
-  )
+```{r sim_data}
+
+#' Simulate data
+#'
+#' This simulates true/reference data from a Normal Distribution
+#' and then truncated and rounded subsets based on parameters passed in.
+#'
+#' @return data.frame containing y_true, y_trunc and y_round.
+#' 
+sim_data <- function(N, p, a, b, sigma)
+{
+    # Simulate data
+    tmp <- data.frame(x = rnorm(N, 0, 5)) %>% 
+      mutate(
+        y_true = a + b*x + rnorm(N, 0, sigma),
+         y_round = y_true,
+         y_trunc = y_true
+      )
+    
+    sidx <- sample(1:N, N * p, replace=FALSE)
+    
+    # Simulate a "mixture" with some subset of the data truncated/rounded
+    tmp$y_round[sidx] <- round(tmp$y_round[sidx])
+    tmp$y_trunc[sidx] <- trunc(tmp$y_trunc[sidx])
+    
+    return(tmp)
 }
 ```
 
-# Reference Distribution Known
 
-## Two-Sample Kolmogorv-Smirnoff Test
+```{r ci_contains}
 
-```{r warning=FALSE}
-
-# Test proportion of rounding
-ks_round <- df_tidy %>% 
-  group_by(prop, n) %>% 
-  summarise(tidy(ks.test(y_true, y_round))) %>% 
-  ungroup() %>%
-  mutate(method="Two-sample KS test, y_true vs. y_round")
-
-ks_trunc <- df_tidy %>% 
-  group_by(prop, n) %>% 
-  summarise(tidy(ks.test(y_true, y_trunc))) %>% 
-  ungroup() %>%
-  mutate(method="Two-sample KS test, y_true vs. y_trunc")
-
-rbind(ks_round, ks_trunc) %>% 
-  ggplot(mapping=aes(x=prop, 
-                        y=p.value, 
-                        color=factor(n))) +
-  geom_point() +
-  geom_line() +
-  geom_hline(mapping=aes(yintercept=0.05),
-             color="red",
-             linetype="dashed") +
-  scale_x_continuous(breaks=prop) +
-  labs(x="Proportion of truncated data",
-       color="Number of Obs") +
-  facet_grid(~method)
+#' Check if CI contains true/reference values
+#'
+#' Given a tidy data.frame, check if the (1-alpha)% CI contains the true value.
+#'
+#' @return boolean.
+#' 
+ci_contains <- function(fit, true, alpha=0.05) {
+  lb <- fit$estimate + qnorm(alpha/2) * fit$std.error
+  ub <- fit$estimate - qnorm(alpha/2) * fit$std.error
+  return((lb <= true) & (true <= ub))
+}
 ```
 
-For $\alpha=0.05$:
 
-* The KS test fails to reject the null hypothesis that the samples are drawn from the same distribution for all simulated rounded data cases .
+```{r reject_rates}
 
-* The KS rejects the null when the sample size is large (>500 obs) and the proportion truncated is high (>0.7) for the simulated truncated data cases.
+#' Runs simulations to estimate rejection rates for various methods
+#'
+#' 
+#'
+#' 
+reject_rates <- function(N, p, a, b, sigma, alpha=0.05)
+{
+  Nsim <- 1000
+  
+  KS_round_reject <- rep(NA, Nsim)
+  KS_trunc_reject <- rep(NA, Nsim)
+  SW_round_reject <- rep(NA, Nsim)
+  SW_trunc_reject <- rep(NA, Nsim)
+  # OLS_round_reject <- rep(NA, Nsim)
+  # OLS_trunc_reject <- rep(NA, Nsim)
+  
+  for (i in 1:Nsim) {
 
-# Family of Distribution Known
+    tmp <- sim_data(N, p, a, b, sigma)
+    
+    
+    # Kolmogorov-Smirnov Tests
+    KS_round_reject[i] <- tidy(ks.test(tmp$y_round, "pnorm", 
+                                    mean=mean(tmp$y_round), 
+                                    sd=sd(tmp$y_round))
+                            )$p.value < alpha
+    
+    KS_trunc_reject[i] <- tidy(ks.test(tmp$y_trunc, "pnorm", 
+                                    mean=mean(tmp$y_trunc), 
+                                    sd=sd(tmp$y_trunc))
+                            )$p.value < alpha
+    
+    # Shapiro-Wilk Tests
+    SW_round_reject[i] <- tidy(shapiro.test(tmp$y_round))$p.value < alpha
+    
+    SW_trunc_reject[i] <- tidy(shapiro.test(tmp$y_trunc))$p.value < alpha
+    
+    # OLS CIs
+    
+    # fit.round <- tidy(lm(y_round ~ x, data=tmp)) %>% 
+    #   filter(term == "x")
+    # OLS_round_reject[i] <- ci_contains(fit.round, b)
+    # 
+    # fit.trunc <- tidy(lm(y_trunc ~ x, data=tmp)) %>% 
+    #   filter(term == "x")
+    # 
+    # OLS_trunc_reject[i] <- ci_contains(fit.trunc, b)
+  }
+  
+  return(list(KS_round_reject = mean(KS_round_reject),
+         KS_trunc_reject = mean(KS_trunc_reject),
+         SW_round_reject = mean(SW_round_reject),
+         SW_trunc_reject = mean(SW_trunc_reject))
+  )
+}
 
-In reality, we don't know the exact reference distribution but we can reasonably assume it is Normal.
-
-# One-Sample Kolmogorv-Smirnov Test
-
-```{r warning=FALSE}
-
-# Test proportion of rounding
-ks1_round <- df_tidy %>% 
-  group_by(prop, n) %>% 
-  summarise(tidy(ks.test(y_round, "pnorm", mean=mean(y_round), sd=sd(y_round)))) %>% 
-  ungroup() %>%
-  mutate(method="One-sample KS test, y_round")
-
-ks1_trunc <- df_tidy %>% 
-  group_by(prop, n) %>% 
-  summarise(tidy(ks.test(y_trunc, "pnorm", mean=mean(y_trunc), sd=sd(y_trunc)))) %>% 
-  ungroup() %>%
-  mutate(method="One-sample KS test, y_trunc")
-
-rbind(ks1_round, ks1_trunc) %>% 
-  ggplot(mapping=aes(x=prop, 
-                        y=p.value, 
-                        color=factor(n))) +
-  geom_point() +
-  geom_line() +
-  geom_hline(mapping=aes(yintercept=0.05),
-             color="red",
-             linetype="dashed") +
-  scale_x_continuous(breaks=prop) +
-  labs(x="Proportion of truncated data",
-       color="Number of Obs") +
-  facet_grid(~method)
 ```
 
-# Shapiro-Wilk Test
 
-Another alternative is the Shapiro-Wilk test, the advantage being that it is more powerful than the Kolmogorov-Smirnov test for testing Normality.
+
+```{r coverage_rates}
+
+#' Runs simulations to estimate rejection rates for various methods
+#'
+#' 
+#'
+#' 
+coverage_rates <- function(N, p, a, b, sigma, alpha=0.05)
+{
+  Nsim <- 1000
+  
+  OLS_round_reject <- rep(NA, Nsim)
+  OLS_trunc_reject <- rep(NA, Nsim)
+  
+  for (i in 1:Nsim) {
+
+    tmp <- sim_data(N, p, a, b, sigma)
+    
+    # OLS CIs
+    
+    fit.round <- tidy(lm(y_round ~ x, data=tmp)) %>%
+      filter(term == "x")
+    OLS_round_reject[i] <- ci_contains(fit.round, b)
+
+    fit.trunc <- tidy(lm(y_trunc ~ x, data=tmp)) %>%
+      filter(term == "x")
+
+    OLS_trunc_reject[i] <- ci_contains(fit.trunc, b)
+  }
+  
+  return(list(OLS_round_reject = mean(OLS_round_reject),
+         OLS_trunc_reject = mean(OLS_trunc_reject))
+  )
+}
+
+```
+
+# Tests for Normality
+
+```{r KS_test, warning=FALSE}
+
+res <- apply(params, 1, function(row) reject_rates(row[1], 
+                                                row[2],
+                                                alpha_true,
+                                                beta_true,
+                                                sigma_true)) 
+
+cbind(params,
+      do.call(rbind.data.frame, res)) %>% 
+  mutate(N=as.factor(N)) %>% 
+  pivot_longer(-c("N", "prop"), names_to="type") %>% 
+  separate(type, c("test_type", "data_type", NULL)) %>% 
+  ggplot(mapping=aes(x=prop, 
+                     y=value,
+                     group=N,
+                     color=N)) +
+  geom_point() +
+  geom_line() +
+  facet_grid(test_type ~ data_type) +
+  labs(x="Proportion of data rounded/truncated",
+       y="Prob[reject Ho]",
+       color="Number of obs",
+       title="Rejection rates, One-sample KS-Test vs SW-Test") +
+  scale_x_continuous(breaks=prop)
+```
+
+# Actual Coverage of OLS Confidence Intervals
 
 ```{r}
-sw_round <- df_tidy %>% 
-  group_by(prop, n) %>% 
-  summarise(tidy(shapiro.test(y_round))) %>% 
-  ungroup() %>% 
-  mutate(method="Shapiro-Wilk test, y_round")
+res <- apply(params, 1, function(row) coverage_rates(row[1], 
+                                                row[2],
+                                                alpha_true,
+                                                beta_true,
+                                                sigma_true)) 
 
-sw_trunc <- df_tidy %>% 
-  group_by(prop, n) %>% 
-  summarise(tidy(shapiro.test(y_trunc))) %>% 
-  ungroup() %>% 
-  mutate(method="Shapiro-Wilk test, y_trunc")
-
-rbind(sw_round, sw_trunc) %>% 
+cbind(params,
+      do.call(rbind.data.frame, res)) %>% 
+  mutate(N=as.factor(N)) %>% 
+  pivot_longer(-c("N", "prop"), names_to="type") %>% 
+  separate(type, c("test_type", "data_type", NULL)) %>% 
   ggplot(mapping=aes(x=prop, 
-                        y=p.value, 
-                        color=factor(n))) +
+                     y=value,
+                     group=N,
+                     color=N)) +
   geom_point() +
   geom_line() +
-  geom_hline(mapping=aes(yintercept=0.05),
+  geom_hline(mapping=aes(yintercept=0.95),
              color="red",
              linetype="dashed") +
-  scale_x_continuous(breaks=prop) +
-  labs(x="Proportion of rounded data",
-       color="Number of Obs") +
-  facet_grid(~method)
-
+  facet_grid(test_type ~ data_type) +
+  labs(x="Proportion of data rounded/truncated",
+       y="Proportion CIs Containg True Value",
+       color="Number of obs",
+       title="CI Actual Coverage") +
+  scale_x_continuous(breaks=prop)
 ```
-
-# Bayesian Models
-
-```{r}
-
-```
-
 
