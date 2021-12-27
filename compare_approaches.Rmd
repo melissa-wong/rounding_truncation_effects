@@ -1,7 +1,7 @@
 ---
 title: "Compare Approaches"
 author: "Melissa Wong"
-date: "12/15/2021"
+date: "12/18/2021"
 output: html_document
 ---
 
@@ -80,10 +80,10 @@ sim_data <- function(N, p, a, b, sigma)
 {
     # Simulate data
     tmp <- data.frame(x = rnorm(N, 0, 5)) %>% 
-      mutate(
-        y_true = a + b*x + rnorm(N, 0, sigma),
-         y_round = y_true,
-         y_trunc = y_true
+      mutate(y_true = a + b*x + rnorm(N, 0, sigma),
+             y_round = y_true,
+             y_trunc = y_true,
+             iflag= 0
       )
     
     sidx <- sample(1:N, N * p, replace=FALSE)
@@ -91,6 +91,7 @@ sim_data <- function(N, p, a, b, sigma)
     # Simulate a "mixture" with some subset of the data truncated/rounded
     tmp$y_round[sidx] <- round(tmp$y_round[sidx])
     tmp$y_trunc[sidx] <- trunc(tmp$y_trunc[sidx])
+    tmp$iflag[sidx] <- 1
     
     return(tmp)
 }
@@ -128,8 +129,7 @@ reject_rates <- function(N, p, a, b, sigma, alpha=0.05)
   KS_trunc_reject <- rep(NA, Nsim)
   SW_round_reject <- rep(NA, Nsim)
   SW_trunc_reject <- rep(NA, Nsim)
-  # OLS_round_reject <- rep(NA, Nsim)
-  # OLS_trunc_reject <- rep(NA, Nsim)
+
   
   for (i in 1:Nsim) {
 
@@ -152,16 +152,6 @@ reject_rates <- function(N, p, a, b, sigma, alpha=0.05)
     
     SW_trunc_reject[i] <- tidy(shapiro.test(tmp$y_trunc))$p.value < alpha
     
-    # OLS CIs
-    
-    # fit.round <- tidy(lm(y_round ~ x, data=tmp)) %>% 
-    #   filter(term == "x")
-    # OLS_round_reject[i] <- ci_contains(fit.round, b)
-    # 
-    # fit.trunc <- tidy(lm(y_trunc ~ x, data=tmp)) %>% 
-    #   filter(term == "x")
-    # 
-    # OLS_trunc_reject[i] <- ci_contains(fit.trunc, b)
   }
   
   return(list(KS_round_reject = mean(KS_round_reject),
@@ -174,10 +164,9 @@ reject_rates <- function(N, p, a, b, sigma, alpha=0.05)
 ```
 
 
+```{r ols_coverage_rates}
 
-```{r coverage_rates}
-
-#' Runs simulations to estimate rejection rates for various methods
+#' Runs simulations to estimate actual coverage for OLS Confidence Intervals
 #'
 #' 
 #'
@@ -212,6 +201,7 @@ coverage_rates <- function(N, p, a, b, sigma, alpha=0.05)
 
 ```
 
+
 # Tests for Normality
 
 ```{r KS_test, warning=FALSE}
@@ -243,7 +233,7 @@ cbind(params,
 
 # Actual Coverage of OLS Confidence Intervals
 
-```{r}
+```{r ols_ci_coverage}
 res <- apply(params, 1, function(row) coverage_rates(row[1], 
                                                 row[2],
                                                 alpha_true,
@@ -268,7 +258,137 @@ cbind(params,
   labs(x="Proportion of data rounded/truncated",
        y="Proportion CIs Containg True Value",
        color="Number of obs",
-       title="CI Actual Coverage") +
+       title="OLS Model CI Actual Coverage") +
   scale_x_continuous(breaks=prop)
 ```
+
+# Bayesian Credible Interval Coverage
+
+Finally, evaluate actual coverage when using the "correct" model.
+
+## Bayes Packages Setup
+
+```{r brm_setup}
+library(tidybayes)
+library(brms)
+#library(cmdstanr)
+
+ncores <- min(4, parallel::detectCores()-1)
+
+source(here("src/brm_likelihoods.R"))
+```
+
+
+```{r bayes_coverage, results='hide'}
+# Fit initial model with dummy data so we don't have to 
+# recompile everytime through the loop
+
+dummy <- sim_data(5, 0.5, alpha_true, beta_true, sigma_true)
+
+fit.round <- brm(y_round | vint(iflag) ~ 1 + x,
+                 prior = c(set_prior("normal(0, 5)", class="Intercept"),
+                           set_prior("exponential(1)", class="sigma")),
+                 data=dummy,
+                 family=rounded_normal,
+                 stanvars = stanvar(scode=stan_funs_rounded_normal,
+                                    block="functions"),
+                 chains=4,
+                 cores=ncores,
+                 file_refit = "on_change",
+                 file = here("brm_models/fit_round.rds"))
+
+
+fit.trunc <- brm(y_trunc | vint(iflag) ~ 1 + x,
+                 prior = c(set_prior("normal(0, 5)", class="Intercept"),
+                           set_prior("exponential(1)", class="sigma")),
+                 data=dummy,
+                 family=truncated_normal,
+                 stanvars = stanvar(scode=stan_funs_truncated_normal,
+                                    block="functions"),
+                 chains=4,
+                 cores=ncores,
+                 file_refit = "on_change",
+                 file = here("brm_models/fit_trunc.rds"))
+
+res <- data.frame(N = params$N,
+                  prop = params$prop,
+                  brm_round_reject = rep(NA, nrow(params)),
+                  brm_trunc_reject = rep(NA, nrow(params)))
+
+for (j in 1:nrow(params)) {
+  print(j)
+  
+  Nsim <- 1000
+  
+  brm_round_reject <- rep(NA, Nsim)
+  brm_trunc_reject <- rep(NA, Nsim)
+  
+  for (i in 1:Nsim) {
+
+    tmp <- sim_data(res[j,"N"], 
+                    res[j,"prop"], 
+                    alpha_true, 
+                    beta_true,
+                    sigma_true)
+    
+    # Bayesian Models
+    
+    fit.round.loop <- update(fit.round, 
+                             newdata=tmp,
+                             chains=ncores,
+                             refresh=0)
+    
+    fit.round.fixef <- fit.round.loop %>%
+      gather_draws(b_x) %>%
+      median_hdci()
+    
+    brm_round_reject[i] <- (fit.round.fixef$.lower <= beta_true) & 
+      (beta_true <= fit.round.fixef$.upper)
+
+    fit.trunc.loop <- update(fit.trunc, 
+                             newdata=tmp,
+                             refresh=0)
+    
+    fit.trunc.fixef <- fit.trunc.loop %>%
+      gather_draws(b_x) %>%
+      median_hdci()
+    
+    brm_trunc_reject[i] <- (fit.trunc.fixef$.lower <= beta_true) & 
+      (beta_true <= fit.trunc.fixef$.upper)
+  }
+  
+  res[j, "brm_round_reject"] = mean(brm_round_reject)
+  res[j, "brm_trunc_reject"] = mean(brm_trunc_reject)
+
+}
+```
+
+
+```{r}
+saveRDS(res, here("bayes_results.rds"))
+```
+
+```{r bayes_coverage_plot}
+res %>% 
+  mutate(N=as.factor(N)) %>% 
+  pivot_longer(-c("N", "prop"), names_to="type") %>% 
+  separate(type, c("mdl", "data_type", NULL)) %>% 
+  ggplot(mapping=aes(x=prop, 
+                     y=value,
+                     group=N,
+                     color=N)) +
+  geom_point() +
+  geom_line() +
+  geom_hline(mapping=aes(yintercept=0.95),
+             color="red",
+             linetype="dashed") +
+  facet_grid( ~ data_type) +
+  labs(x="Proportion of data rounded/truncated",
+       y="Proportion CIs Containg True Value",
+       color="Number of obs",
+       title="Correct Likelihood Model Credible Interval Actual Coverage") +
+  scale_x_continuous(breaks=prop)
+```
+
+
 
