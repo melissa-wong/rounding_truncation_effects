@@ -34,14 +34,15 @@ library(tidyverse)
 library(broom)
 library(RColorBrewer)
 library(here)
+library(janitor)
 ```
 
 ```{r options}
 options("scipen" = 1, "digits" = 4)
 
 #knitr::opts_chunk$set(echo = FALSE)
-#knitr::opts_chunk$set(message = FALSE)
-#knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
 #knitr::opts_chunk$set(out.width = "50%")
 #knitr::opts_chunk$set(fig.align = "center")
 
@@ -81,7 +82,8 @@ sim_data <- function(N, p, a, b, sigma)
     # Simulate data
     tmp <- data.frame(x = rnorm(N, 0, 5)) %>% 
       mutate(y_true = a + b*x + rnorm(N, 0, sigma),
-             y_round = y_true,
+             y_round_iec60559 = y_true,
+             y_round_half_up = y_true,
              y_trunc = y_true,
              iflag= 0
       )
@@ -89,7 +91,10 @@ sim_data <- function(N, p, a, b, sigma)
     sidx <- sample(1:N, N * p, replace=FALSE)
     
     # Simulate a "mixture" with some subset of the data truncated/rounded
-    tmp$y_round[sidx] <- round(tmp$y_round[sidx])
+    # IEC60559 rounds 0.5 to nearest even integer
+    tmp$y_round_iec60559[sidx] <- round(tmp$y_round_iec60559[sidx])
+    # Round 0.5 away from zero (MS Excel)
+    tmp$y_round_half_up[sidx] <- round_half_up(tmp$y_round_half_up[sidx])
     tmp$y_trunc[sidx] <- trunc(tmp$y_trunc[sidx])
     tmp$iflag[sidx] <- 1
     
@@ -387,7 +392,8 @@ res %>%
        y="Proportion CIs Containg True Value",
        color="Number of obs",
        title="Correct Likelihood Model Credible Interval Actual Coverage") +
-  scale_x_continuous(breaks=prop)
+  scale_x_continuous(breaks=prop) +
+  scale_y_continuous(limits=c(0.0, 1.0))
 ```
 
 
